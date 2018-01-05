@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"database/sql"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/x509"
@@ -113,6 +114,26 @@ func (s *Scanner) isCertErrorFatal(err error, logEntry *ct.LogEntry, index int64
 		// No error to handle
 		return false
 	} else if _, ok := err.(x509.NonFatalErrors); ok {
+
+		db, err_sql := sql.Open("postgres", "user=postgres password=postgres dbname=ct2")
+		if err_sql != nil {
+			//log.Fatal(err_sql)
+			s.Log(fmt.Sprintf("sql error in error handling"))
+		}
+		var data []byte
+		if logEntry.Leaf.TimestampedEntry.EntryType == 1 {
+			data = logEntry.Leaf.TimestampedEntry.PrecertEntry.TBSCertificate
+		} else {
+			data = logEntry.Leaf.TimestampedEntry.X509Entry.Data
+		}
+
+		_, err_sql = db.Exec("INSERT INTO unparsable VALUES ($1, $2);", data, string(err.Error()))
+		if err_sql != nil {
+			s.Log(fmt.Sprintf("sql error in error handling"))
+			//log.Fatal(err_sql)
+		}
+		db.Close()
+
 		atomic.AddInt64(&s.entriesWithNonFatalErrors, 1)
 		// We'll make a note, but continue.
 		s.Log(fmt.Sprintf("Non-fatal error in %+v at index %d: %s", logEntry.Leaf.TimestampedEntry.EntryType, index, err.Error()))
@@ -228,6 +249,13 @@ func humanTime(seconds int) string {
 	return s
 }
 
+func minimum(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // Scan performs a scan against the Log.
 // For each x509 certificate found, foundCert will be called with the
 // index of the entry and certificate itself as arguments.  For each precert
@@ -235,18 +263,20 @@ func humanTime(seconds int) string {
 // precert string as the arguments.
 //
 // This method blocks until the scan is complete.
-func (s *Scanner) Scan(ctx context.Context, foundCert func(*ct.LogEntry), foundPrecert func(*ct.LogEntry)) error {
+func (s *Scanner) Scan(ctx context.Context, foundCert func(*ct.LogEntry), foundPrecert func(*ct.LogEntry)) (int64, error) {
 	s.Log("Starting up...\n")
 	s.certsProcessed = 0
 	s.precertsSeen = 0
 	s.unparsableEntries = 0
 	s.entriesWithNonFatalErrors = 0
 
-	latestSth, err := s.logClient.GetSTH(ctx)
+	latestSthTmp, err := s.logClient.GetSTH(ctx)
+	latestSth := minimum(100000, int(latestSthTmp.TreeSize))
+	s.Log(fmt.Sprintf("Real Tree Size: %d, Will use Tree Size: %d", latestSthTmp.TreeSize, latestSth))
 	if err != nil {
-		return fmt.Errorf("failed to GetSTH(): %v", err)
+		return int64(latestSth), err
 	}
-	s.Log(fmt.Sprintf("Got STH with %d certs", latestSth.TreeSize))
+	s.Log(fmt.Sprintf("Got STH with %d certs", latestSth))
 
 	ticker := time.NewTicker(time.Second)
 	startTime := time.Now()
@@ -256,7 +286,7 @@ func (s *Scanner) Scan(ctx context.Context, foundCert func(*ct.LogEntry), foundP
 		for range ticker.C {
 			certsProcessed := atomic.LoadInt64(&s.certsProcessed)
 			throughput := float64(certsProcessed) / time.Since(startTime).Seconds()
-			remainingCerts := int64(latestSth.TreeSize) - int64(s.opts.StartIndex) - certsProcessed
+			remainingCerts := int64(latestSth) - int64(s.opts.StartIndex) - certsProcessed
 			remainingSeconds := int(float64(remainingCerts) / throughput)
 			remainingString := humanTime(remainingSeconds)
 			s.Log(fmt.Sprintf("Processed: %d certs (to index %d). Throughput: %3.2f ETA: %s\n", certsProcessed,
@@ -265,8 +295,10 @@ func (s *Scanner) Scan(ctx context.Context, foundCert func(*ct.LogEntry), foundP
 	}()
 
 	var ranges list.List
-	for start := s.opts.StartIndex; start < int64(latestSth.TreeSize); {
-		end := min(start+int64(s.opts.BatchSize), int64(latestSth.TreeSize)) - 1
+	// TODO in next line: replace 0 with s.opts.StartIndex
+	for start := int64(s.opts.StartIndex); start < int64(latestSth); {
+		// TODO end := min(start+int64(s.opts.BatchSize), int64(latestSth.TreeSize)) - 1
+		end := min(start+int64(s.opts.BatchSize), int64(latestSth)) - 1
 		ranges.PushBack(fetchRange{start, end})
 		start = end + 1
 	}
@@ -301,7 +333,7 @@ func (s *Scanner) Scan(ctx context.Context, foundCert func(*ct.LogEntry), foundP
 	s.Log(fmt.Sprintf("Completed %d certs in %s", atomic.LoadInt64(&s.certsProcessed), humanTime(int(time.Since(startTime).Seconds()))))
 	s.Log(fmt.Sprintf("Saw %d precerts", atomic.LoadInt64(&s.precertsSeen)))
 	s.Log(fmt.Sprintf("%d unparsable entries, %d non-fatal errors", atomic.LoadInt64(&s.unparsableEntries), atomic.LoadInt64(&s.entriesWithNonFatalErrors)))
-	return nil
+	return int64(latestSth), nil
 }
 
 // NewScanner creates a new Scanner instance using client to talk to the log,

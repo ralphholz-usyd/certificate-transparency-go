@@ -22,6 +22,14 @@ To compile the log scanner run:
 go build github.com/google/certificate-transparency-go/scanner/main/scanner.go
 ```
 
+# PostgreSQL
+
+The custom scanner requires a PostgreSQL instance running on port 7777. To create the required tables run:
+
+```bash
+scanner/initialize_db.sh
+```
+
 # Contributing
 
 When sending pull requests, please ensure that everything's been run
