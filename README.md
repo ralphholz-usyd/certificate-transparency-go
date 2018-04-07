@@ -16,6 +16,12 @@ go get github.com/tumi8/certificate-transparency-go/scanner
 
 # Building the binaries
 
+You need extra libraries:
+
+```bash
+go get github.com/lib/pq
+```
+
 To compile the log scanner run:
 
 ```bash
